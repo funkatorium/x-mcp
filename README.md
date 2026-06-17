@@ -74,4 +74,4 @@ claude mcp add twitter-brand -e API_KEY=... -- python3 server.py
 
 ## License
 
-MIT — [The Funkatorium](https://funkatorium.com)
+MIT - [The Funkatorium](https://github.com/funkatorium)
