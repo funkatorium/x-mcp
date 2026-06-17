@@ -1,11 +1,14 @@
-#!/opt/homebrew/bin/python3.11
+#!/usr/bin/env python3
 """X (Twitter) MCP server — OAuth 1.0a, X API v2, FastMCP."""
+
+from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -28,8 +31,32 @@ BASE_URL = "https://api.twitter.com"
 
 mcp = FastMCP("x-mcp")
 
+_user_id_cache: dict = {}
+_MY_USER_ID: str | None = None
 
-def _oauth_request(method, url, body=None, params=None):
+_RE_USERNAME = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+_RE_TWEET_ID = re.compile(r"^\d{1,25}$")
+
+
+def _validate_username(username: str) -> str | None:
+    """Return error detail string if invalid, else None."""
+    if not _RE_USERNAME.match(username):
+        return "username must be 1-15 alphanumeric/underscore characters"
+    return None
+
+
+def _validate_tweet_id(tweet_id: str) -> str | None:
+    """Return error detail string if invalid, else None."""
+    if not _RE_TWEET_ID.match(tweet_id):
+        return "tweet_id must be numeric (1-25 digits)"
+    return None
+
+
+def _clamp_max_results(max_results: int) -> int:
+    return max(10, min(100, max_results))
+
+
+def _oauth_request(method: str, url: str, body=None, params=None) -> dict:
     oauth_params = {
         "oauth_consumer_key": API_KEY,
         "oauth_nonce": uuid.uuid4().hex,
@@ -75,12 +102,15 @@ def _oauth_request(method, url, body=None, params=None):
         req.data = json.dumps(body).encode()
 
     try:
-        resp = urllib.request.urlopen(req)
-        return json.loads(resp.read())
+        resp = urllib.request.urlopen(req, timeout=15)
+        try:
+            return json.loads(resp.read())
+        except (json.JSONDecodeError, ValueError):
+            return {"error": "Invalid response", "detail": "Server returned non-JSON body"}
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read())
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             detail = e.reason
         return {"error": f"HTTP {e.code}", "detail": detail}
     except urllib.error.URLError as e:
@@ -96,6 +126,8 @@ def get_me() -> dict:
 @mcp.tool()
 def get_user_profile(username: str) -> dict:
     """Return a user's public profile by username."""
+    if err := _validate_username(username):
+        return {"error": "Invalid parameter", "detail": err}
     url = f"{BASE_URL}/2/users/by/username/{urllib.parse.quote(username, '')}"
     params = {
         "user.fields": "description,public_metrics,pinned_tweet_id,profile_image_url"
@@ -106,6 +138,9 @@ def get_user_profile(username: str) -> dict:
 @mcp.tool()
 def post_tweet(text: str, reply_to_tweet_id: str | None = None) -> dict:
     """Post a tweet. Optionally reply to an existing tweet by ID."""
+    if reply_to_tweet_id:
+        if err := _validate_tweet_id(reply_to_tweet_id):
+            return {"error": "Invalid parameter", "detail": err}
     body: dict = {"text": text}
     if reply_to_tweet_id:
         body["reply"] = {"in_reply_to_tweet_id": reply_to_tweet_id}
@@ -115,6 +150,7 @@ def post_tweet(text: str, reply_to_tweet_id: str | None = None) -> dict:
 @mcp.tool()
 def search_tweets(query: str, max_results: int = 10) -> dict:
     """Search recent tweets matching a query."""
+    max_results = _clamp_max_results(max_results)
     params = {
         "query": query,
         "max_results": str(max_results),
@@ -126,15 +162,23 @@ def search_tweets(query: str, max_results: int = 10) -> dict:
 @mcp.tool()
 def get_user_tweets(username: str, max_results: int = 10) -> dict:
     """Return recent tweets from a user by username."""
-    user_resp = _oauth_request(
-        "GET", f"{BASE_URL}/2/users/by/username/{urllib.parse.quote(username, '')}"
-    )
-    if "error" in user_resp:
-        return user_resp
-    try:
-        user_id = user_resp["data"]["id"]
-    except (KeyError, TypeError):
-        return {"error": "Could not resolve user ID", "detail": user_resp}
+    if err := _validate_username(username):
+        return {"error": "Invalid parameter", "detail": err}
+    max_results = _clamp_max_results(max_results)
+
+    if username in _user_id_cache:
+        user_id = _user_id_cache[username]
+    else:
+        user_resp = _oauth_request(
+            "GET", f"{BASE_URL}/2/users/by/username/{urllib.parse.quote(username, '')}"
+        )
+        if "error" in user_resp:
+            return user_resp
+        try:
+            user_id = user_resp["data"]["id"]
+        except (KeyError, TypeError):
+            return {"error": "Could not resolve user ID", "detail": user_resp}
+        _user_id_cache[username] = user_id
 
     params = {
         "max_results": str(max_results),
@@ -146,13 +190,17 @@ def get_user_tweets(username: str, max_results: int = 10) -> dict:
 @mcp.tool()
 def get_timeline(max_results: int = 10) -> dict:
     """Return the authenticated user's reverse-chronological home timeline."""
-    me_resp = _oauth_request("GET", f"{BASE_URL}/2/users/me")
-    if "error" in me_resp:
-        return me_resp
-    try:
-        my_id = me_resp["data"]["id"]
-    except (KeyError, TypeError):
-        return {"error": "Could not resolve own user ID", "detail": me_resp}
+    global _MY_USER_ID
+    max_results = _clamp_max_results(max_results)
+
+    if _MY_USER_ID is None:
+        me_resp = _oauth_request("GET", f"{BASE_URL}/2/users/me")
+        if "error" in me_resp:
+            return me_resp
+        try:
+            _MY_USER_ID = me_resp["data"]["id"]
+        except (KeyError, TypeError):
+            return {"error": "Could not resolve own user ID", "detail": me_resp}
 
     params = {
         "max_results": str(max_results),
@@ -160,7 +208,7 @@ def get_timeline(max_results: int = 10) -> dict:
     }
     return _oauth_request(
         "GET",
-        f"{BASE_URL}/2/users/{my_id}/timelines/reverse_chronological",
+        f"{BASE_URL}/2/users/{_MY_USER_ID}/timelines/reverse_chronological",
         params=params,
     )
 
@@ -168,6 +216,8 @@ def get_timeline(max_results: int = 10) -> dict:
 @mcp.tool()
 def delete_tweet(tweet_id: str) -> dict:
     """Delete a tweet by ID."""
+    if err := _validate_tweet_id(tweet_id):
+        return {"error": "Invalid parameter", "detail": err}
     return _oauth_request("DELETE", f"{BASE_URL}/2/tweets/{urllib.parse.quote(tweet_id, '')}")
 
 
