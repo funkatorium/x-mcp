@@ -45,6 +45,18 @@ claude mcp add twitter \
 
 The seven tools appear automatically. No configuration beyond the credentials.
 
+### Optional: use Xquik for search
+
+`search_tweets` can use the Xquik API instead of the X API recent search endpoint.
+Set these variables in addition to your normal server command:
+
+- `X_SEARCH_BACKEND=xquik`
+- `XQUIK_API_KEY=your_xquik_api_key`
+- `XQUIK_BASE_URL=https://xquik.com/api/v1` (optional)
+
+This only changes `search_tweets`. Profile, timeline, post, and delete tools keep
+using the OAuth 1.0a X API credentials above.
+
 ## Requirements
 
 - Python 3.9+
@@ -62,4 +74,4 @@ claude mcp add twitter-brand -e API_KEY=... -- python3 server.py
 
 ## License
 
-MIT — [The Funkatorium](https://funkatorium.com)
+MIT - [The Funkatorium](https://github.com/funkatorium)

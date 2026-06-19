@@ -19,8 +19,13 @@ from mcp.server.fastmcp import FastMCP
 
 _REQUIRED_ENV = ("API_KEY", "API_SECRET_KEY", "ACCESS_TOKEN", "ACCESS_TOKEN_SECRET")
 _missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
+X_SEARCH_BACKEND = os.environ.get("X_SEARCH_BACKEND", "x").lower()
+XQUIK_API_KEY = os.environ.get("XQUIK_API_KEY")
+XQUIK_BASE_URL = os.environ.get("XQUIK_BASE_URL", "https://xquik.com/api/v1").rstrip("/")
 if _missing:
     raise RuntimeError(f"Missing required environment variables: {', '.join(_missing)}")
+if X_SEARCH_BACKEND == "xquik" and not XQUIK_API_KEY:
+    raise RuntimeError("Missing required environment variable: XQUIK_API_KEY")
 
 API_KEY = os.environ["API_KEY"]
 API_SECRET_KEY = os.environ["API_SECRET_KEY"]
@@ -117,6 +122,33 @@ def _oauth_request(method: str, url: str, body=None, params=None) -> dict:
         return {"error": "Network error", "detail": str(e.reason)}
 
 
+def _xquik_request(path, params=None):
+    if not XQUIK_API_KEY:
+        return {"error": "Missing required environment variable", "detail": "XQUIK_API_KEY"}
+
+    req_url = f"{XQUIK_BASE_URL}{path}"
+    if params:
+        req_url += "?" + urllib.parse.urlencode(params)
+
+    req = urllib.request.Request(
+        req_url,
+        method="GET",
+        headers={"Accept": "application/json", "x-api-key": XQUIK_API_KEY},
+    )
+
+    try:
+        resp = urllib.request.urlopen(req)
+        return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read())
+        except Exception:
+            detail = e.reason
+        return {"error": f"HTTP {e.code}", "detail": detail}
+    except urllib.error.URLError as e:
+        return {"error": "Network error", "detail": str(e.reason)}
+
+
 @mcp.tool()
 def get_me() -> dict:
     """Return the authenticated user's profile."""
@@ -151,6 +183,12 @@ def post_tweet(text: str, reply_to_tweet_id: str | None = None) -> dict:
 def search_tweets(query: str, max_results: int = 10) -> dict:
     """Search recent tweets matching a query."""
     max_results = _clamp_max_results(max_results)
+    if X_SEARCH_BACKEND == "xquik":
+        return _xquik_request(
+            "/x/tweets/search",
+            params={"q": query, "limit": str(max_results)},
+        )
+
     params = {
         "query": query,
         "max_results": str(max_results),
